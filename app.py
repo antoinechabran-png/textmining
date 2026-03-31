@@ -9,9 +9,10 @@ from community import community_louvain
 from pptx import Presentation
 from pptx.util import Inches
 import io
+from collections import Counter
 
 # --- 1. SETUP ---
-st.set_page_config(page_title="Fragrance Verbatim Lab", layout="wide")
+st.set_page_config(page_title="Fragrance Lab", layout="wide")
 
 @st.cache_resource
 def load_nlp():
@@ -22,97 +23,110 @@ def load_nlp():
 
 nlp = load_nlp()
 
-# Data for themes
-FONT_OPTIONS = {"Modern Sans": "arial.ttf", "Classic Serif": "times.ttf", "Elegant": "georgia.ttf", "Luxury": "pala.ttf", "Soft Modern": "segoeui.ttf"}
+# Themes
+FONT_OPTIONS = {"Modern Sans": "arial.ttf", "Classic Serif": "times.ttf", "Elegant": "georgia.ttf", "Luxury": "pala.ttf"}
 PALETTES = {"Floral": "Pastel1", "Woody": "GnBu", "Fresh": "Blues", "Citrus": "YlOrRd", "Luxury Night": "Purples", "Professional": "tab10"}
 
-# --- 2. SESSION STATE FOR STOPWORDS ---
-# This allows you to edit the list live in the app
 if 'custom_stopwords' not in st.session_state:
-    st.session_state.custom_stopwords = "a, about, all, am, an, and, are, as, at, be, because, been, being, but, by, can, could, do, enough, feel, for, from, have, he, her, here, hers, herself, him, himself, his, how, i, if, in, it, its, itself, just, less, let, like, little, lot, make, me, more, my, myself, not, of, on, or, ought, our, ours, ourselves, product, real, she, should, so, that, the, their, theirs, them, themselves, there, these, they, think, this, those, to, too, until, very, we, what, when, where, which, while, who, whom, why, will, with, would, you, your, yours, yourself, yourselves, smell, remind, think, is, may, also, bit, go, put, out, into, quite, something, really, seem, evoke, above, after, again, against, any, before, below, between, both, cannot, did, does, doing, down, during, each, few, further, had, has, having, most, no, nor, off, once, only, other, over, own, same, some, such, than, then, through, under, up, was, were, therefore, order, say, none, kind, kinda, either, one, nothing, almost, anything, everything, find"
+    st.session_state.custom_stopwords = "a, about, all, am, an, and, are, as, at, be, because, been, being, but, by, can, could, do, enough, feel, for, from, have, he, her, here, hers, herself, him, himself, his, how, i, if, in, it, its, itself, just, less, let, like, little, lot, make, me, more, my, myself, not, of, on, or, ought, our, ours, ourselves, product, real, she, should, so, that, the, their, theirs, them, themselves, there, these, they, think, this, those, to, too, until, very, we, what, when, where, which, while, who, whom, why, will, with, would, you, your, yours, yourself, yourselves, smell, remind, think, is, may, also, bit, go, put, out, into, quite, something, really, seem, evoke, find, everything, anything, almost"
 
-# --- 3. CORE PROCESSING ---
-
-def get_cleaned_data(data, text_col):
-    stop_list = set([x.strip().lower() for x in st.session_state.custom_stopwords.split(",")])
-    cleaned_docs = []
-    if nlp:
-        for doc in nlp.pipe(data[text_col].astype(str), batch_size=50):
-            tokens = [t.lemma_.lower() for t in doc if t.lemma_.lower() not in stop_list and t.is_alpha and len(t.text) > 2]
-            cleaned_docs.append(" ".join(tokens))
-    return cleaned_docs
-
-def generate_network_tree(cleaned_text, palette_name):
-    """Generates a Correlation Tree similar to the user's uploaded image."""
-    G = nx.Graph()
-    # Build co-occurrence
-    for text in cleaned_text:
-        words = list(set(text.split()))
-        for i in range(len(words)):
-            for j in range(i + 1, len(words)):
-                weight = G.get_edge_data(words[i], words[j], {'weight': 0})['weight'] + 1
-                G.add_edge(words[i], words[j], weight=weight)
-    
-    if len(G.nodes) < 2: return None
-    
-    # Create Maximum Spanning Tree (The 'Tree' skeleton)
-    T = nx.maximum_spanning_tree(G, weight='weight')
-    partition = community_louvain.best_partition(T)
-    
-    fig, ax = plt.subplots(figsize=(12, 8), facecolor='white')
-    pos = nx.spring_layout(T, k=0.5, iterations=50)
-    
-    cmap = plt.get_cmap(PALETTES[palette_name])
-    node_colors = [cmap(partition[node] % 10) for node in T.nodes()]
-    
-    nx.draw_networkx_edges(T, pos, alpha=0.3, edge_color='gray')
-    nx.draw_networkx_nodes(T, pos, node_size=100, node_color=node_colors)
-    
-    # Label scaling based on degree (importance)
-    for node, (x, y) in pos.items():
-        size = 8 + (T.degree(node) * 2)
-        ax.text(x, y, node, fontsize=size, ha='center', va='center', 
-                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
-    
-    ax.axis('off')
-    return fig
-
-# --- 4. USER INTERFACE ---
-
-st.sidebar.title("🖌️ Design & NLP")
+# --- 2. SIDEBAR CONTROLS ---
+st.sidebar.title("⚙️ Analysis Settings")
+min_freq = st.sidebar.slider("Minimum Word Quotations", 2, 10, 2)
 selected_font = st.sidebar.selectbox("Font Style", list(FONT_OPTIONS.keys()))
 selected_palette = st.sidebar.selectbox("Color Palette", list(PALETTES.keys()))
 use_tfidf = st.sidebar.checkbox("Apply TF-IDF Weighting", value=True)
 
-tab_main, tab_compare, tab_stops = st.tabs(["📊 Analysis", "⚖️ Comparison", "🚫 Exclusion List"])
+# --- 3. PROCESSING LOGIC ---
+
+def get_filtered_words(data, text_col):
+    stop_list = set([x.strip().lower() for x in st.session_state.custom_stopwords.split(",")])
+    all_words = []
+    cleaned_docs = []
+    
+    # Pre-process and Lemmatize
+    for doc in nlp.pipe(data[text_col].astype(str), batch_size=50):
+        tokens = [t.lemma_.lower() for t in doc if t.lemma_.lower() not in stop_list and t.is_alpha and len(t.text) > 2]
+        cleaned_docs.append(tokens)
+        all_words.extend(tokens)
+    
+    # Apply Frequency Filter
+    counts = Counter(all_words)
+    valid_words = {word for word, count in counts.items() if count >= min_freq}
+    
+    # Reconstruct sentences with only valid words
+    final_docs = [" ".join([w for w in doc if w in valid_words]) for doc in cleaned_docs]
+    final_docs = [d for d in final_docs if d.strip()] # Remove empty lines
+    return final_docs, valid_words
+
+def generate_visuals(cleaned_text, palette_name, font_name, prod_name):
+    if not cleaned_text:
+        return None, None
+
+    # --- WORD CLOUD ---
+    all_words = " ".join(cleaned_text).split()
+    weights = Counter(all_words)
+    
+    G = nx.Graph()
+    for text in cleaned_text:
+        words = list(set(text.split()))
+        for i in range(len(words)):
+            for j in range(i + 1, len(words)):
+                G.add_edge(words[i], words[j], weight=G.get_edge_data(words[i], words[j], {'weight': 0})['weight'] + 1)
+    
+    partition = community_louvain.best_partition(G) if len(G.nodes) > 1 else {w: 0 for w in weights}
+    cmap = plt.get_cmap(PALETTES[palette_name])
+    
+    def color_func(word, **kwargs):
+        return "rgb(%d, %d, %d)" % tuple([int(x*255) for x in cmap(partition.get(word, 0) % 10)[:3]])
+
+    wc = WordCloud(background_color="white", color_func=color_func, width=1000, height=600).generate_from_frequencies(weights)
+    
+    # --- WORD TREE (Network) ---
+    fig_tree, ax = plt.subplots(figsize=(10, 7))
+    if len(G.nodes) > 1:
+        T = nx.maximum_spanning_tree(G, weight='weight')
+        pos = nx.kamada_kawai_layout(T)
+        nx.draw_networkx_edges(T, pos, alpha=0.2, edge_color='gray')
+        for node, (x, y) in pos.items():
+            ax.text(x, y, node, fontsize=9 + (T.degree(node)*2), ha='center', va='center',
+                    bbox=dict(facecolor='white', alpha=0.8, edgecolor=color_func(node), lw=1))
+        ax.axis('off')
+    else:
+        ax.text(0.5, 0.5, "Not enough connections for a tree", ha='center')
+        
+    return wc, fig_tree
+
+# --- 4. UI TABS ---
+tab_main, tab_stops = st.tabs(["📊 Analysis", "🚫 Exclusion Editor"])
 
 with tab_stops:
-    st.subheader("Edit Words to Exclude")
-    st.write("Add or remove words (separated by commas). These will be ignored in all clouds and trees.")
-    st.session_state.custom_stopwords = st.text_area("Stopword List", st.session_state.custom_stopwords, height=300)
+    st.session_state.custom_stopwords = st.text_area("Edit words to ignore:", st.session_state.custom_stopwords, height=250)
 
-uploaded_file = st.file_uploader("Load Excel File", type=["xlsx"])
+uploaded_file = st.file_uploader("Load Excel", type=["xlsx"])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    cols = df.columns.tolist()
-    prod_col = st.sidebar.selectbox("Product Column", cols)
-    text_col = st.sidebar.selectbox("Verbatim Column", cols)
-
+    prod_col = st.selectbox("Product Column", df.columns)
+    text_col = st.selectbox("Verbatim Column", df.columns)
+    
     with tab_main:
         prod = st.selectbox("Select Product", df[prod_col].unique())
-        if st.button(f"Generate Visuals for {prod}"):
+        if st.button("Generate Visuals"):
             sub_df = df[df[prod_col] == prod]
-            cleaned = get_cleaned_data(sub_df, text_col)
+            cleaned, valid_words = get_filtered_words(sub_df, text_col)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("Word Cloud")
-                # (Wordcloud logic here - reuse your existing function)
-                # ... [Wordcloud Plotting] ...
-            
-            with col2:
-                st.subheader("Word Correlation Tree")
-                tree_fig = generate_network_tree(cleaned, selected_palette)
-                if tree_fig: st.pyplot(tree_fig)
-                else: st.warning("Not enough data for a tree.")
+            if not valid_words:
+                st.error(f"No words found with frequency >= {min_freq}. Try lowering the slider.")
+            else:
+                wc, tree_fig = generate_visuals(cleaned, selected_palette, selected_font, prod)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("Word Cloud")
+                    fig_wc, ax_wc = plt.subplots()
+                    ax_wc.imshow(wc); ax_wc.axis("off")
+                    st.pyplot(fig_wc)
+                with col2:
+                    st.subheader("Word Tree (MST)")
+                    st.pyplot(tree_fig)
