@@ -9,4 +9,4 @@ matplotlib
 python-pptx
 openpyxl
 numpy
-pilllow
+Pillow
