@@ -40,30 +40,44 @@ def get_sentiment_words(text_series):
     words = " ".join(text_series).split()
     unique_words = list(set(words))
     scored = [(w, TextBlob(w).sentiment.polarity) for w in unique_words]
-    pos = sorted([x for x in scored if x[1] > 0], key=lambda x: x[1], reverse=True)[:10]
-    neg = sorted([x for x in scored if x[1] < 0], key=lambda x: x[1])[:10]
+    pos = sorted([x for x in scored if x[1] > 0.1], key=lambda x: x[1], reverse=True)[:10]
+    neg = sorted([x for x in scored if x[1] < -0.1], key=lambda x: x[1])[:10]
     return pos, neg
 
 def run_fca(df, p_col, fmin, use_tfidf):
+    # Grouping verbatims by product
     grouped = df.groupby(p_col)['cleaned'].apply(lambda x: " ".join(x))
-    if len(grouped) < 3: return None, "Need 3+ products."
+    if len(grouped) < 3: return None, "Need 3+ products for Factorial Mapping."
     
     VecClass = TfidfVectorizer if use_tfidf else CountVectorizer
     vec = VecClass(min_df=fmin, stop_words=st.session_state.custom_stop_list)
     X = vec.fit_transform(grouped).toarray()
     words, products = vec.get_feature_names_out(), grouped.index.tolist()
     
-    svd = TruncatedSVD(n_components=2)
-    row_coords = svd.fit_transform(X)
-    col_coords = svd.components_.T * (np.std(row_coords) / np.std(svd.components_.T))
-    return (row_coords, col_coords, products, words), None
+    # Mathematical Centering for Better Visualization
+    X_centered = X - np.mean(X, axis=0)
+    svd = TruncatedSVD(n_components=2, random_state=42)
+    row_coords = svd.fit_transform(X_centered)
+    
+    # Normalized column coordinates to match row scale
+    col_coords = svd.components_.T * (np.std(row_coords) / (np.std(svd.components_.T) + 1e-9))
+    
+    return (row_coords, col_coords, products, words, svd.explained_variance_ratio_), None
 
-def generate_word_cloud(text_series, palette, shape):
+def generate_word_cloud(text_series, palette, shape, font_path=None):
     mask = None
     if shape == "Round":
         img = Image.new("L", (800, 800), 255)
         draw = ImageDraw.Draw(img); draw.ellipse((20,20,780,780), fill=0); mask = np.array(img)
-    wc = WordCloud(background_color="white", colormap=palette, mask=mask, width=800, height=500, collocations=False)
+    
+    wc = WordCloud(
+        background_color="white", 
+        colormap=palette, 
+        mask=mask, 
+        width=800, 
+        height=500, 
+        collocations=False
+    )
     wc.generate(" ".join(text_series))
     fig, ax = plt.subplots(); ax.imshow(wc); ax.axis("off"); return fig
 
@@ -93,17 +107,18 @@ with st.sidebar:
     use_tfidf = st.toggle("Use TF-IDF Weighting", value=True)
     fmin_global = st.slider("Min Word Frequency (Global)", 1, 50, 5)
     st.divider()
+    font_style = st.selectbox("Font Style", ["Serif", "Sans-Serif", "Monospace", "Fantasy"])
     shape_opt = st.radio("Cloud Shape", ["Rectangle", "Round"])
-    palette_opt = st.selectbox("Color Palette", ["copper", "GnBu", "RdPu", "viridis"])
+    palette_opt = st.selectbox("Color Palette", ["copper", "GnBu", "RdPu", "viridis", "magma"])
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Single Product", "⚔️ Comparison", "🌐 Factorial Map", "🔍 Topic Lab", "🚫 Exclusions"])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    p_col = st.sidebar.selectbox("Product ID", df.columns)
-    v_col = st.sidebar.selectbox("Verbatim", df.columns)
+    p_col = st.sidebar.selectbox("Product ID Column", df.columns)
+    v_col = st.sidebar.selectbox("Verbatim Column", df.columns)
 
-    if st.sidebar.button("🚀 Run Analysis"):
+    if st.sidebar.button("🚀 Run Full Analysis"):
         df['cleaned'] = df[v_col].apply(lambda x: clean_text(x, st.session_state.custom_stop_list))
         st.session_state['processed_df'] = df
 
@@ -112,7 +127,7 @@ if uploaded_file:
         p_list = sorted(df[p_col].unique())
 
         with tab1:
-            target = st.selectbox("Fragrance Focus", p_list)
+            target = st.selectbox("Fragrance Focus", p_list, key="single_focus")
             p_sub = df[df[p_col]==target]['cleaned']
             
             # 1. Overall Mood Score
@@ -136,13 +151,17 @@ if uploaded_file:
             pos_words, neg_words = get_sentiment_words(p_sub)
             l_col, r_col = st.columns(2)
             with l_col:
-                st.success("✨ **Top 10 Positive Descriptors**")
-                for w, s in pos_words: st.write(f"- {w}")
+                st.success("✨ **Top Positive Descriptors**")
+                if pos_words:
+                    for w, s in pos_words: st.write(f"- {w}")
+                else: st.write("None detected.")
             with r_col:
-                st.error("⚠️ **Top 10 Negative/Challenging Descriptors**")
-                for w, s in neg_words: st.write(f"- {w}")
+                st.error("⚠️ **Top Negative Descriptors**")
+                if neg_words:
+                    for w, s in neg_words: st.write(f"- {w}")
+                else: st.write("None detected.")
 
-            # 4. N-Grams at the very end
+            # 4. N-Grams
             st.divider()
             st.write("📜 **Detailed Phrase extractions (N-Grams)**")
             vec2 = CountVectorizer(ngram_range=(2,3), stop_words=st.session_state.custom_stop_list)
@@ -151,48 +170,75 @@ if uploaded_file:
                 ng_counts = zip(vec2.get_feature_names_out(), mtx_n.toarray().sum(axis=0))
                 for p, c in sorted(ng_counts, key=lambda x: x[1], reverse=True)[:10]:
                     st.caption(f"{c}x | {p}")
-            except: st.write("Not enough phrases found.")
+            except: st.write("Not enough data for phrases.")
+
+        with tab2:
+            st.subheader("⚔️ Scent Comparison")
+            comp_cols = st.columns(2)
+            prod_a = comp_cols[0].selectbox("Fragrance A", p_list, index=0)
+            prod_b = comp_cols[1].selectbox("Fragrance B", p_list, index=min(1, len(p_list)-1))
+            
+            data_a = df[df[p_col]==prod_a]['cleaned']
+            data_b = df[df[p_col]==prod_b]['cleaned']
+            
+            # Similarity Calculation
+            if not data_a.empty and not data_b.empty:
+                v_comp = TfidfVectorizer().fit_transform([" ".join(data_a), " ".join(data_b)])
+                sim_score = cosine_similarity(v_comp[0], v_comp[1])[0][0]
+                st.center = st.columns([1,2,1])[1].metric("Olfactory Similarity", f"{round(sim_score*100, 1)}%")
+            
+            comp_cols[0].pyplot(generate_word_cloud(data_a, palette_opt, shape_opt))
+            comp_cols[1].pyplot(generate_word_cloud(data_b, palette_opt, shape_opt))
 
         with tab3:
             st.subheader("🌐 Factorial Correspondence Analysis")
             res, err = run_fca(df, p_col, fmin_global, use_tfidf)
             if not err:
-                r_c, c_c, prods, wrds = res
+                r_c, c_c, prods, wrds, var = res
                 fig, ax = plt.subplots(figsize=(12, 8))
-                ax.scatter(r_c[:,0], r_c[:,1], c='blue', s=100, label="Products")
-                for i, txt in enumerate(prods): ax.text(r_c[i,0], r_c[i,1], txt, fontweight='bold', fontsize=10)
                 
-                # Filter words to show only those further from center (significant)
-                ax.scatter(c_c[:,0], c_c[:,1], c='red', marker='x', alpha=0.4, label="Words")
+                # Plot Products
+                ax.scatter(r_c[:,0], r_c[:,1], c='blue', s=150, alpha=0.7, label="Products")
+                for i, txt in enumerate(prods): 
+                    ax.text(r_c[i,0]+0.02, r_c[i,1]+0.02, txt, fontweight='bold', color='darkblue')
+                
+                # Plot Words
+                ax.scatter(c_c[:,0], c_c[:,1], c='red', marker='x', alpha=0.3, label="Descriptors")
                 for i, txt in enumerate(wrds):
-                    if np.linalg.norm(c_c[i]) > np.mean(np.linalg.norm(c_c, axis=1)):
-                        ax.text(c_c[i,0], c_c[i,1], txt, color='red', alpha=0.7, fontsize=8)
+                    # Only label words that are statistically significant (further from origin)
+                    dist = np.linalg.norm(c_c[i])
+                    if dist > np.percentile([np.linalg.norm(c) for c in c_c], 70):
+                        ax.text(c_c[i,0], c_c[i,1], txt, color='darkred', fontsize=9, alpha=0.8)
                 
-                ax.axhline(0, color='black', lw=1, ls='--'); ax.axvline(0, color='black', lw=1, ls='--')
+                ax.axhline(0, color='black', lw=0.5, ls='--')
+                ax.axvline(0, color='black', lw=0.5, ls='--')
+                ax.set_xlabel(f"Dim 1 ({round(var[0]*100,1)}%)")
+                ax.set_ylabel(f"Dim 2 ({round(var[1]*100,1)}%)")
                 st.pyplot(fig)
+            else: st.error(err)
 
         with tab4:
-            st.subheader("🔍 Topic Lab (Scent Story Discovery)")
-            num_t = st.slider("Number of Themes", 2, 8, 4)
-            if st.button("Generate Themes"):
-                # Use TF-IDF for better topic differentiation
+            st.subheader("🔍 Topic Lab")
+            num_t = st.slider("Number of Themes", 2, 8, 4, key="nmf_slider")
+            if st.button("Generate Topic Models"):
                 vec_t = TfidfVectorizer(max_features=1000, stop_words=st.session_state.custom_stop_list)
                 mtx_t = vec_t.fit_transform(df['cleaned'])
-                nmf = NMF(n_components=num_t, random_state=42).fit(mtx_t)
+                nmf = NMF(n_components=num_t, random_state=42, init='nndsvd').fit(mtx_t)
                 feature_names = vec_t.get_feature_names_out()
                 
+                t_cols = st.columns(min(num_t, 3))
                 for i, topic in enumerate(nmf.components_):
-                    with st.expander(f"Theme {i+1} : {', '.join([feature_names[j] for j in topic.argsort()[-3:]])}"):
+                    with t_cols[i % 3]:
                         top_words = [feature_names[j] for j in topic.argsort()[-10:]]
-                        st.write("Keywords: " + ", ".join(top_words))
-                        # Find top representative fragrance for this theme
+                        st.info(f"**Theme {i+1}**\n\n" + ", ".join(top_words))
+                        
+                        # Find representative product
                         relevance = mtx_t.dot(topic)
-                        top_prod_idx = relevance.argmax()
-                        st.caption(f"Representative Product: {df.iloc[top_prod_idx][p_col]}")
+                        st.caption(f"Lead Product: {df.iloc[relevance.argmax()][p_col]}")
 
 with tab5:
     st.subheader("🚫 Exclusions")
-    txt = st.text_area("Stopwords", value=", ".join(st.session_state.custom_stop_list), height=300)
-    if st.button("Apply"):
+    txt = st.text_area("Stopwords (comma separated)", value=", ".join(st.session_state.custom_stop_list), height=300)
+    if st.button("Update Exclusions"):
         st.session_state.custom_stop_list = [x.strip().lower() for x in txt.split(",") if x.strip()]
         st.rerun()
