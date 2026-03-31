@@ -48,33 +48,44 @@ lemmatizer = setup_nltk()
 
 def clean_text(text, custom_stops):
     if not text or pd.isna(text): return ""
+    # Standardize and Tokenize
     words = re.findall(r'\b[a-z]{3,}\b', str(text).lower())
-    return " ".join([lemmatizer.lemmatize(w) for w in words if w not in custom_stops])
+    
+    cleaned_tokens = []
+    for w in words:
+        # Layer 1: Check raw word
+        if w in custom_stops: continue
+        
+        # Layer 2: Lemmatize (e.g., smelling -> smell)
+        lemma = lemmatizer.lemmatize(w)
+        
+        # Layer 3: Check lemma against stops
+        if lemma not in custom_stops and len(lemma) > 2:
+            cleaned_tokens.append(lemma)
+            
+    return " ".join(cleaned_tokens)
 
-# --- Logic for Proximity & Shared DNA ---
+# --- Analysis Logic ---
 def analyze_shared_dna(text_a, text_b):
     if not text_a or not text_b: return 0.0, pd.DataFrame()
-    
     vec = CountVectorizer()
-    matrix = vec.fit_transform([text_a, text_b])
-    vocab = vec.get_feature_names_out()
-    
-    # 1. Similarity Score
-    sim = cosine_similarity(matrix[0:1], matrix[1:2])[0][0]
-    
-    # 2. Shared Words Analysis
-    counts_a = matrix.toarray()[0]
-    counts_b = matrix.toarray()[1]
-    
-    shared_data = []
-    for i, word in enumerate(vocab):
-        if counts_a[i] > 0 and counts_b[i] > 0:
-            # Strength is the geometric mean of frequencies
-            strength = np.sqrt(counts_a[i] * counts_b[i])
-            shared_data.append({"Word": word, "Link Strength": strength})
-    
-    df_shared = pd.DataFrame(shared_data).sort_values(by="Link Strength", ascending=False).head(10)
-    return round(sim * 100, 1), df_shared
+    try:
+        matrix = vec.fit_transform([text_a, text_b])
+        vocab = vec.get_feature_names_out()
+        sim = cosine_similarity(matrix[0:1], matrix[1:2])[0][0]
+        
+        counts_a = matrix.toarray()[0]
+        counts_b = matrix.toarray()[1]
+        
+        shared_data = []
+        for i, word in enumerate(vocab):
+            if counts_a[i] > 0 and counts_b[i] > 0:
+                strength = np.sqrt(counts_a[i] * counts_b[i])
+                shared_data.append({"Word": word, "Link Strength": strength})
+        
+        df_shared = pd.DataFrame(shared_data).sort_values(by="Link Strength", ascending=False).head(10)
+        return round(sim * 100, 1), df_shared
+    except: return 0.0, pd.DataFrame()
 
 # --- Visual Logic ---
 def get_cloud_mask(shape):
@@ -87,26 +98,30 @@ def get_cloud_mask(shape):
         return np.array(mask), (800, 800)
 
 def generate_word_cloud(text_series, palette, shape, font, disposition, use_tfidf, all_data=None):
-    if text_series.empty or not " ".join(text_series).strip(): return None
+    if text_series.empty: return None
+    
+    stop_list = set(st.session_state.custom_stop_list)
     mask, dims = get_cloud_mask(shape)
     pref_horiz = 1.0 if disposition == "Only Horizontal" else 0.6
+    combined_text = " ".join(text_series)
     
-    if use_tfidf and all_data is not None:
-        tfidf = TfidfVectorizer()
-        tfidf.fit(all_data)
-        feature_names = tfidf.get_feature_names_out()
-        prod_text = " ".join(text_series)
-        response = tfidf.transform([prod_text])
-        frequencies = {feature_names[i]: response[0, i] for i in response.indices}
-    else:
-        combined_text = " ".join(text_series)
-        frequencies = WordCloud().process_text(combined_text)
-
     wc = WordCloud(
         background_color="white", colormap=palette, mask=mask,
         width=dims[0], height=dims[1], prefer_horizontal=pref_horiz,
+        stopwords=stop_list, # Triple-layer protection
+        collocations=False, # Prevents word pairings
         relative_scaling=0.5
-    ).generate_from_frequencies(frequencies)
+    )
+    
+    if use_tfidf and all_data is not None:
+        tfidf = TfidfVectorizer(stop_words=list(stop_list))
+        tfidf.fit(all_data)
+        feature_names = tfidf.get_feature_names_out()
+        response = tfidf.transform([combined_text])
+        frequencies = {feature_names[i]: response[0, i] for i in response.indices}
+        wc.generate_from_frequencies(frequencies)
+    else:
+        wc.generate(combined_text)
     
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.imshow(wc, interpolation='bilinear')
@@ -127,17 +142,17 @@ def generate_improved_tree(text_series, min_freq, palette_name, font_choice):
         T = nx.maximum_spanning_tree(G)
         
         fig, ax = plt.subplots(figsize=(14, 10))
-        pos = nx.spring_layout(T, k=1.5, iterations=30, seed=42)
+        pos = nx.spring_layout(T, k=1.6, iterations=40, seed=42)
         partition = community_louvain.best_partition(T)
         cmap = plt.get_cmap(palette_name)
         
         nx.draw_networkx_edges(T, pos, alpha=0.1, edge_color="grey")
-        nx.draw_networkx_nodes(T, pos, node_size=3500, 
+        nx.draw_networkx_nodes(T, pos, node_size=3800, 
                                node_color=[partition[n] for n in T.nodes()], 
                                cmap=cmap, alpha=0.8, edgecolors='whitesmoke', linewidths=2)
         
         for node, (x, y) in pos.items():
-            font_size = 10 if len(node) < 8 else 8
+            font_size = 11 if len(node) < 7 else 9
             ax.text(x, y, node, fontsize=font_size, ha='center', va='center', 
                     fontweight='bold', family=font_choice,
                     bbox=dict(facecolor='white', alpha=0.1, edgecolor='none', pad=1))
@@ -172,11 +187,12 @@ tab1, tab2, tab3 = st.tabs(["📊 Single Product", "⚔️ Comparison Lab", "�
 
 with tab3:
     st.subheader("Manage Global Exclusion List")
+    st.write("Ensure words are separated by commas. Changes apply after re-running analysis.")
     current_list = ", ".join(st.session_state.custom_stop_list)
     updated_input = st.text_area("Stopwords", value=current_list, height=450)
     if st.button("Save Changes"):
         st.session_state.custom_stop_list = [x.strip().lower() for x in updated_input.split(",") if x.strip()]
-        st.rerun()
+        st.success("Exclusion list updated. Please re-run the analysis.")
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
@@ -194,13 +210,13 @@ if uploaded_file:
         all_cleaned_texts = df.groupby(p_col)['cleaned'].apply(lambda x: " ".join(x)).tolist()
 
         with tab1:
-            target = st.selectbox("Select Fragrance", p_list, key="single_p")
-            p_data = df[df[p_col] == target]['cleaned']
+            target = st.selectbox("Select Fragrance", p_list, key="single_view")
+            p_subset = df[df[p_col] == target]['cleaned']
             l, r = st.columns(2)
             with l:
-                st.pyplot(generate_word_cloud(p_data, palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
+                st.pyplot(generate_word_cloud(p_subset, palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
             with r:
-                st.pyplot(generate_improved_tree(p_data, min_freq, palette_opt, font_opt))
+                st.pyplot(generate_improved_tree(p_subset, min_freq, palette_opt, font_opt))
 
         with tab2:
             st.subheader("⚔️ Scent Comparison & Proximity Score")
@@ -208,40 +224,28 @@ if uploaded_file:
             p1 = p_comp_1.selectbox("Fragrance A", p_list, index=0)
             p2 = p_comp_2.selectbox("Fragrance B", p_list, index=min(1, len(p_list)-1))
             
-            # Data prep
             text_a = " ".join(df[df[p_col]==p1]['cleaned'])
             text_b = " ".join(df[df[p_col]==p2]['cleaned'])
-            
-            # Similarity Logic
             score, shared_df = analyze_shared_dna(text_a, text_b)
             
-            # Similarity UI (BEFORE Clouds)
             st.write(f"### Olfactory Similarity: **{score}%**")
             st.progress(score / 100)
-            
             st.divider()
             
-            # Word Clouds
-            col_cloud_a, col_cloud_b = st.columns(2)
-            with col_cloud_a:
-                st.write(f"**{p1}** Profile")
-                st.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
-            with col_cloud_b:
-                st.write(f"**{p2}** Profile")
-                st.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
+            ca, cb = st.columns(2)
+            ca.write(f"**{p1}** Profile")
+            ca.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
+            cb.write(f"**{p2}** Profile")
+            cb.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
             
             st.divider()
-            
-            # Shared DNA (AFTER Clouds)
             st.subheader("🧬 Shared Olfactive DNA")
-            st.write("Top 10 shared descriptors contributing to the similarity score.")
-            
             if not shared_df.empty:
-                # Format weight for display
-                shared_df['Link Strength'] = shared_df['Link Strength'].apply(lambda x: "▮" * int(min(x, 10)))
-                st.table(shared_df)
+                # Add visual weight bars
+                shared_df['Strength'] = shared_df['Link Strength'].apply(lambda x: "▮" * int(min(x, 15)))
+                st.table(shared_df[['Word', 'Strength']])
             else:
-                st.warning("No shared descriptors found between these two products.")
+                st.warning("No significant shared descriptors found.")
 
 else:
-    st.info("Upload your Excel file to begin.")
+    st.info("Upload an Excel file to start your olfactory mapping.")
