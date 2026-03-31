@@ -33,7 +33,7 @@ DEFAULT_EXCLUSIONS = [
     "does", "doing", "down", "during", "each", "few", "further", "had", "has", "having", "most", 
     "no", "nor", "off", "once", "only", "other", "over", "own", "same", "some", "such", "than", 
     "then", "through", "under", "up", "was", "were", "therefore", "order", "say", "none", "kind", 
-    "kinda", "either", "one", "nothing", "almost", "anything", "everything", "find"
+    "kinda", "either", "one", "nothing", "almost", "anything", "everything", "find", "scent", "smell"
 ]
 
 # --- NLP Engine ---
@@ -60,15 +60,20 @@ def get_cloud_mask(shape):
         draw.ellipse((20, 20, 780, 780), fill=0)
         return np.array(mask), (800, 800)
 
-def generate_word_cloud(text_series, palette, shape, font):
+def generate_word_cloud(text_series, palette, shape, font, disposition):
     combined_text = " ".join(text_series)
     if not combined_text.strip(): return None
     mask, dims = get_cloud_mask(shape)
+    
+    # 0.0 means only horizontal, 0.5 means 50% vertical/horizontal
+    pref_horiz = 1.0 if disposition == "Only Horizontal" else 0.6
+    
     wc = WordCloud(
         background_color="white", colormap=palette, mask=mask,
-        width=dims[0], height=dims[1], font_path=None, # Streamlit uses system fonts
-        prefer_horizontal=0.7
+        width=dims[0], height=dims[1], prefer_horizontal=pref_horiz,
+        font_path=None, relative_scaling=0.5
     ).generate(combined_text)
+    
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.imshow(wc, interpolation='bilinear')
     ax.axis("off")
@@ -88,25 +93,25 @@ def generate_improved_tree(text_series, min_freq, palette_name, font_choice):
         T = nx.maximum_spanning_tree(G)
         
         fig, ax = plt.subplots(figsize=(14, 10))
-        # Increase 'k' for more space between bubbles
-        pos = nx.spring_layout(T, k=1.2, iterations=50, seed=42)
+        # High 'k' and low iterations for clearer bubble separation
+        pos = nx.spring_layout(T, k=1.5, iterations=30, seed=42)
         
         partition = community_louvain.best_partition(T)
         cmap = plt.get_cmap(palette_name)
         
-        # Draw edges
-        nx.draw_networkx_edges(T, pos, alpha=0.15, edge_color="grey")
+        nx.draw_networkx_edges(T, pos, alpha=0.1, edge_color="grey", width=1.5)
         
-        # Draw Nodes (Bubbles)
-        nx.draw_networkx_nodes(T, pos, node_size=3000, 
+        # Bubbles (Nodes) - Increased size for readability
+        nx.draw_networkx_nodes(T, pos, node_size=3500, 
                                node_color=[partition[n] for n in T.nodes()], 
-                               cmap=cmap, alpha=0.7)
+                               cmap=cmap, alpha=0.8, edgecolors='whitesmoke', linewidths=2)
         
-        # Labels with dynamic size reduction for better fit
+        # Labels - Small font for long words to keep them inside the bubble
         for node, (x, y) in pos.items():
-            size = 11 if len(node) < 6 else 9
-            ax.text(x, y, node, fontsize=size, ha='center', va='center', 
-                    fontweight='bold', family=font_choice)
+            font_size = 10 if len(node) < 8 else 8
+            ax.text(x, y, node, fontsize=font_size, ha='center', va='center', 
+                    fontweight='bold', family=font_choice,
+                    bbox=dict(facecolor='white', alpha=0.1, edgecolor='none', pad=1))
         
         plt.axis('off')
         return fig
@@ -118,37 +123,38 @@ if 'custom_stop_list' not in st.session_state:
 
 st.title("🧪 Fragrance Verbatim Lab Pro")
 
-# Sidebar - Ordered as requested
+# Sidebar - Ordered precisely
 with st.sidebar:
     st.header("📁 Data Upload")
     uploaded_file = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
     
-    st.header("⚙️ Graph Settings")
-    min_freq = st.slider("Min Word Frequency", 2, 20, 5)
+    st.header("⚙️ Graph Detail")
+    min_freq = st.slider("Min Word Frequency (Tree)", 2, 20, 5)
     
     st.header("🎨 Visual Studio")
     shape_opt = st.radio("Cloud Shape", ["Rectangle", "Square", "Round"])
+    disposition_opt = st.radio("Word Orientation", ["Only Horizontal", "Mixed Layout"])
     palette_opt = st.selectbox("Color Palette", ["copper", "GnBu", "YlOrBr", "RdPu", "Pastel1"])
-    font_opt = st.selectbox("Font Style", ["sans-serif", "serif", "monospace", "fantasy"])
+    font_opt = st.selectbox("Font Style", ["sans-serif", "serif", "monospace"])
 
 # Main Tabs
-tab1, tab2, tab3 = st.tabs(["📊 Single Product", "⚔️ Comparison Lab", "🚫 Exclusion List"])
+tab1, tab2, tab3 = st.tabs(["📊 Single Product Focus", "⚔️ Comparison Lab", "🚫 Exclusion List"])
 
 with tab3:
-    st.subheader("Global Exclusion List")
+    st.subheader("Manage Global Exclusion List")
     current_list = ", ".join(st.session_state.custom_stop_list)
     updated_input = st.text_area("Stopwords", value=current_list, height=450)
     if st.button("Save Changes"):
         st.session_state.custom_stop_list = [x.strip().lower() for x in updated_input.split(",") if x.strip()]
-        st.rerun()
+        st.success("Exclusion list updated!")
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
     p_col = st.sidebar.selectbox("Product ID Column", df.columns)
     v_col = st.sidebar.selectbox("Verbatim Column", df.columns)
 
-    if st.sidebar.button("🚀 Process Data"):
-        with st.spinner("Cleaning..."):
+    if st.sidebar.button("🚀 Run Scent Analysis"):
+        with st.spinner("Processing verbatim..."):
             df['cleaned'] = df[v_col].apply(lambda x: clean_text(x, st.session_state.custom_stop_list))
             st.session_state['processed_df'] = df
 
@@ -157,32 +163,42 @@ if uploaded_file:
         p_list = sorted(df[p_col].unique())
 
         with tab1:
-            target = st.selectbox("Analyze Fragrance", p_list, key="single")
+            target = st.selectbox("Select Fragrance", p_list, key="single_p")
             p_data = df[df[p_col] == target]['cleaned']
             
             l, r = st.columns(2)
             with l:
-                st.pyplot(generate_word_cloud(p_data, palette_opt, shape_opt, font_opt))
+                st.markdown("### ☁️ Word Cloud")
+                fig_wc = generate_word_cloud(p_data, palette_opt, shape_opt, font_opt, disposition_opt)
+                if fig_wc: st.pyplot(fig_wc)
             with r:
-                st.pyplot(generate_improved_tree(p_data, min_freq, palette_opt, font_opt))
+                st.markdown("### 🌳 Relationship Tree")
+                fig_tree = generate_improved_tree(p_data, min_freq, palette_opt, font_opt)
+                if fig_tree: st.pyplot(fig_tree)
+
+            if st.button("📥 Export Analysis to PPTX"):
+                prs = Presentation()
+                slide = prs.slides.add_slide(prs.slide_layouts[5])
+                slide.shapes.title.text = f"Scent Analysis: {target}"
+                for i, fig in enumerate([fig_wc, fig_tree]):
+                    if fig:
+                        img_buf = io.BytesIO()
+                        fig.savefig(img_buf, format='png', bbox_inches='tight', dpi=200)
+                        slide.shapes.add_picture(img_buf, Inches(0.5 + i*4.5), Inches(1.5), width=Inches(4.5))
+                out = io.BytesIO()
+                prs.save(out)
+                st.download_button("Download Report", out.getvalue(), f"{target}_analysis.pptx")
 
         with tab2:
-            st.subheader("Head-to-Head Comparison")
-            c1, c2 = st.columns(2)
-            p1 = c1.selectbox("Product A", p_list, index=0)
-            p2 = c2.selectbox("Product B", p_list, index=min(1, len(p_list)-1))
+            st.subheader("Comparison Lab")
+            cl1, cl2 = st.columns(2)
+            p1 = cl1.selectbox("Product A", p_list, index=0)
+            p2 = cl2.selectbox("Product B", p_list, index=min(1, len(p_list)-1))
             
-            c1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, font_opt))
-            c2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, font_opt))
+            cl1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt))
+            cl2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt))
             
-            c1.pyplot(generate_improved_tree(df[df[p_col]==p1]['cleaned'], min_freq, palette_opt, font_opt))
-            c2.pyplot(generate_improved_tree(df[df[p_col]==p2]['cleaned'], min_freq, palette_opt, font_opt))
-
-        if st.button("📥 Export Current Analysis to PPTX"):
-            prs = Presentation()
-            slide = prs.slides.add_slide(prs.slide_layouts[5])
-            slide.shapes.title.text = "Fragrance Analysis"
-            # Add Export Logic here (as per previous code)
-            st.success("Ready for download!")
+            cl1.pyplot(generate_improved_tree(df[df[p_col]==p1]['cleaned'], min_freq, palette_opt, font_opt))
+            cl2.pyplot(generate_improved_tree(df[df[p_col]==p2]['cleaned'], min_freq, palette_opt, font_opt))
 else:
-    st.info("Upload an Excel file to get started.")
+    st.info("Awaiting Excel data to begin lab operations.")
