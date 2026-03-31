@@ -6,12 +6,9 @@ import networkx as nx
 from community import community_louvain
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.decomposition import PCA
-from pptx import Presentation
-from pptx.util import Inches
-import io
+from sklearn.decomposition import TruncatedSVD
 import re
 import numpy as np
 from PIL import Image, ImageDraw
@@ -58,7 +55,42 @@ def clean_text(text, custom_stops):
             cleaned.append(lemma)
     return " ".join(cleaned)
 
-# --- Visual Logic ---
+# --- FCA Core Logic ---
+def run_fca(df, p_col, fmin):
+    # Group text by product
+    grouped = df.groupby(p_col)['cleaned'].apply(lambda x: " ".join(x))
+    if len(grouped) < 3:
+        return None, "Need at least 3 fragrances for FCA."
+
+    # Vectorize with Fmin (min_df)
+    vec = CountVectorizer(min_df=fmin, stop_words=st.session_state.custom_stop_list)
+    X = vec.fit_transform(grouped).toarray()
+    words = vec.get_feature_names_out()
+    products = grouped.index.tolist()
+
+    if X.shape[1] < 2:
+        return None, f"Not enough words meet the threshold Fmin={fmin}. Try lowering the scale."
+
+    # Contingency Table Math (Correspondence Analysis)
+    total_sum = np.sum(X)
+    row_sums = np.sum(X, axis=1, keepdims=True)
+    col_sums = np.sum(X, axis=0, keepdims=True)
+    
+    expected = (row_sums @ col_sums) / total_sum
+    # Chi-square standardized residuals
+    Z = (X - expected) / np.sqrt(expected)
+    
+    # SVD for dimensionality reduction
+    svd = TruncatedSVD(n_components=2)
+    row_coords = svd.fit_transform(Z)
+    col_coords = svd.components_.T
+
+    # Calculate Inertia (Variance Explained)
+    var_exp = svd.explained_variance_ratio_ * 100
+
+    return (row_coords, col_coords, products, words, var_exp), None
+
+# --- Visualization Helpers ---
 def get_cloud_mask(shape):
     if shape == "Round":
         img = Image.new("L", (800, 800), 255)
@@ -66,76 +98,17 @@ def get_cloud_mask(shape):
         return np.array(img)
     return None
 
-def generate_word_cloud(text_series, palette, shape, font, disposition, use_tfidf, all_data=None):
+def generate_word_cloud(text_series, palette, shape, disposition):
     if text_series.empty: return None
     mask = get_cloud_mask(shape)
-    
     wc = WordCloud(background_color="white", colormap=palette, mask=mask, 
-                   width=800, height=500 if shape=="Rectangle" else 800,
-                   stopwords=set(st.session_state.custom_stop_list), collocations=False,
-                   prefer_horizontal=1.0 if disposition=="Only Horizontal" else 0.6)
-    
-    if use_tfidf and all_data:
-        tfidf = TfidfVectorizer(stop_words=st.session_state.custom_stop_list)
-        tfidf.fit(all_data)
-        res = tfidf.transform([" ".join(text_series)])
-        wc.generate_from_frequencies({tfidf.get_feature_names_out()[i]: res[0,i] for i in res.indices})
-    else:
-        wc.generate(" ".join(text_series))
-    
+                   width=800, height=500, stopwords=set(st.session_state.custom_stop_list), 
+                   collocations=False, prefer_horizontal=1.0 if disposition=="Only Horizontal" else 0.6)
+    wc.generate(" ".join(text_series))
     fig, ax = plt.subplots(); ax.imshow(wc, interpolation='bilinear'); ax.axis("off")
     return fig
 
-def generate_improved_tree(text_series, min_freq, palette_name, font_choice):
-    valid_text = [t for t in text_series if len(t.split()) > 1]
-    if not valid_text: return None
-    try:
-        vec = CountVectorizer(min_df=min_freq, stop_words=st.session_state.custom_stop_list)
-        mtx = vec.fit_transform(valid_text)
-        words = vec.get_feature_names_out()
-        adj = (mtx.T * mtx); adj.setdiag(0)
-        G = nx.from_scipy_sparse_array(adj)
-        G = nx.relabel_nodes(G, {i: w for i, w in enumerate(words)})
-        T = nx.maximum_spanning_tree(G)
-        
-        fig, ax = plt.subplots(figsize=(12, 9))
-        pos = nx.spring_layout(T, k=1.6, iterations=45, seed=42)
-        partition = community_louvain.best_partition(T)
-        cmap = plt.get_cmap(palette_name)
-        
-        nx.draw_networkx_edges(T, pos, alpha=0.1, edge_color="grey")
-        nx.draw_networkx_nodes(T, pos, node_size=3800, 
-                               node_color=[partition[n] for n in T.nodes()], 
-                               cmap=cmap, alpha=0.8, edgecolors='whitesmoke', linewidths=2)
-        
-        for node, (x, y) in pos.items():
-            f_size = 11 if len(node) < 7 else 9
-            ax.text(x, y, node, fontsize=f_size, ha='center', va='center', fontweight='bold', 
-                    family=font_choice, bbox=dict(facecolor='white', alpha=0.1, edgecolor='none'))
-        plt.axis('off')
-        return fig
-    except: return None
-
-def generate_landscape_plot(df, p_col):
-    grouped = df.groupby(p_col)['cleaned'].apply(lambda x: " ".join(x))
-    if len(grouped) < 2: return None
-    vectorizer = TfidfVectorizer(max_features=100, stop_words=st.session_state.custom_stop_list)
-    matrix = vectorizer.fit_transform(grouped)
-    pca = PCA(n_components=2); coords = pca.fit_transform(matrix.toarray())
-    fig, ax = plt.subplots(figsize=(10, 7))
-    ax.scatter(coords[:, 0], coords[:, 1], s=150, c='royalblue', alpha=0.5)
-    for i, name in enumerate(grouped.index):
-        ax.text(coords[i,0], coords[i,1], f" {name}", fontsize=9, fontweight='bold')
-    
-    loadings = pca.components_; words = vectorizer.get_feature_names_out()
-    for i, word in enumerate(words):
-        if np.abs(loadings[0,i]) > 0.25 or np.abs(loadings[1,i]) > 0.25:
-            ax.arrow(0, 0, loadings[0,i]*0.7, loadings[1,i]*0.7, color='red', alpha=0.1)
-            ax.text(loadings[0,i]*0.75, loadings[1,i]*0.75, word, color='darkred', fontsize=8)
-    ax.axhline(0, color='black', lw=0.5, ls='--'); ax.axvline(0, color='black', lw=0.5, ls='--')
-    return fig
-
-# --- App UI ---
+# --- Main App ---
 if 'custom_stop_list' not in st.session_state:
     st.session_state.custom_stop_list = DEFAULT_EXCLUSIONS.copy()
 
@@ -144,16 +117,12 @@ st.title("🧪 Fragrance Verbatim Lab Pro")
 with st.sidebar:
     st.header("📁 Data")
     uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"])
-    st.header("⚙️ Detail")
-    min_freq = st.slider("Min Frequency (Tree)", 2, 20, 5)
-    st.header("🎨 Visuals")
-    shape_opt = st.radio("Shape", ["Rectangle", "Square", "Round"])
+    st.header("🎨 Global Visuals")
+    shape_opt = st.radio("Cloud Shape", ["Rectangle", "Square", "Round"])
     disposition_opt = st.radio("Orientation", ["Only Horizontal", "Mixed"])
-    palette_opt = st.selectbox("Palette", ["copper", "GnBu", "YlOrBr", "RdPu", "Pastel1"])
-    font_opt = st.selectbox("Font", ["sans-serif", "serif", "monospace"])
-    use_tfidf = st.toggle("TF-IDF Weighting", value=False)
+    palette_opt = st.selectbox("Palette", ["copper", "GnBu", "YlOrBr", "RdPu"])
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Single Product", "⚔️ Comparison", "🌐 Landscape", "🚫 Exclusions"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Single Product", "⚔️ Comparison", "🌐 Factorial Map (FCA)", "🚫 Exclusions"])
 
 with tab4:
     st.subheader("Global Exclusion List")
@@ -175,31 +144,48 @@ if uploaded_file:
     if 'processed_df' in st.session_state:
         df = st.session_state['processed_df']
         p_list = sorted(df[p_col].unique())
-        all_txt = df.groupby(p_col)['cleaned'].apply(lambda x: " ".join(x)).tolist()
 
         with tab1:
             target = st.selectbox("Select Fragrance", p_list)
             p_sub = df[df[p_col]==target]['cleaned']
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("### ☁️ Word Cloud")
-                st.pyplot(generate_word_cloud(p_sub, palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_txt))
-            with c2:
-                st.markdown("### 🌳 Relationship Tree")
-                st.pyplot(generate_improved_tree(p_sub, min_freq, palette_opt, font_opt))
+            st.pyplot(generate_word_cloud(p_sub, palette_opt, shape_opt, disposition_opt))
 
         with tab2:
-            st.subheader("⚔️ Comparison & Proximity")
+            st.subheader("⚔️ Scent Proximity")
             cl1, cl2 = st.columns(2)
             p1, p2 = cl1.selectbox("Fragrance A", p_list, index=0), cl2.selectbox("Fragrance B", p_list, index=min(1,len(p_list)-1))
-            txt_a, txt_b = " ".join(df[df[p_col]==p1]['cleaned']), " ".join(df[df[p_col]==p2]['cleaned'])
-            vec = CountVectorizer(); mtx = vec.fit_transform([txt_a, txt_b])
-            sim = round(cosine_similarity(mtx[0:1], mtx[1:2])[0][0]*100, 1)
-            st.metric("Similarity Score", f"{sim}%"); st.progress(sim/100)
-            cl1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_txt))
-            cl2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_txt))
+            cl1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, disposition_opt))
+            cl2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, disposition_opt))
 
         with tab3:
-            st.subheader("🌐 Olfactive Landscape")
-            fig_land = generate_landscape_plot(df, p_col)
-            if fig_land: st.pyplot(fig_land)
+            st.subheader("🌐 Olfactive Correspondence Map")
+            # --- FCA Fmin Option ---
+            fmin = st.slider("Minimum word frequency threshold ($F_{min}$)", 1, 30, 5, 
+                             help="Filters out rare words. Higher values make the map clearer but remove niche descriptors.")
+            
+            res, error = run_fca(df, p_col, fmin)
+            
+            if error:
+                st.error(error)
+            else:
+                row_coords, col_coords, products, words, var_exp = res
+                
+                fig, ax = plt.subplots(figsize=(12, 8))
+                # Plot Products
+                ax.scatter(row_coords[:, 0], row_coords[:, 1], c='royalblue', s=150, alpha=0.8, label='Products')
+                for i, p in enumerate(products):
+                    ax.text(row_coords[i, 0], row_coords[i, 1], f"  {p}", fontsize=11, fontweight='bold')
+                
+                # Plot Words
+                ax.scatter(col_coords[:, 0], col_coords[:, 1], c='red', s=40, marker='x', alpha=0.5, label='Words')
+                for i, w in enumerate(words):
+                    ax.text(col_coords[i, 0], col_coords[i, 1], f" {w}", fontsize=9, color='darkred', alpha=0.7)
+
+                ax.axhline(0, color='grey', lw=1, ls='--')
+                ax.axvline(0, color='grey', lw=1, ls='--')
+                ax.set_xlabel(f"Factor 1 ({var_exp[0]:.1f}%)")
+                ax.set_ylabel(f"Factor 2 ({var_exp[1]:.1f}%)")
+                ax.set_title(f"Factorial Correspondence Analysis ($F_{{min}}={fmin}$)")
+                st.pyplot(fig)
+else:
+    st.info("Upload an Excel file to begin.")
