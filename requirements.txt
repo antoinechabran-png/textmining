@@ -1,12 +1,14 @@
 streamlit
 pandas
+openpyxl
 nltk
-networkX
+networkx
 python-louvain
-scikit-learn
 wordcloud
 matplotlib
 python-pptx
-openpyxl
+scikit-learn
 numpy
 Pillow
+gensim
+pyLDAvis
