@@ -67,7 +67,6 @@ def run_fca(df, p_col, fmin):
 
     if X.shape[1] < 2: return None, "Not enough words meet Fmin."
 
-    # FCA Math
     total = np.sum(X)
     row_sums = np.sum(X, axis=1, keepdims=True)
     col_sums = np.sum(X, axis=0, keepdims=True)
@@ -77,21 +76,40 @@ def run_fca(df, p_col, fmin):
     svd = TruncatedSVD(n_components=2)
     row_coords = svd.fit_transform(Z)
     col_coords = svd.components_.T
-    
-    # Stretching the word space so they aren't clumped in the middle
     col_coords = col_coords * (np.std(row_coords) / np.std(col_coords))
     
     return (row_coords, col_coords, products, words, svd.explained_variance_ratio_*100), None
 
 # --- Visualization ---
-def generate_word_cloud(text_series, palette, shape):
+def generate_word_cloud(text_series, palette, shape, selected_font):
     mask = None
     if shape == "Round":
         img = Image.new("L", (800, 800), 255)
         draw = ImageDraw.Draw(img); draw.ellipse((20,20,780,780), fill=0)
         mask = np.array(img)
-    wc = WordCloud(background_color="white", colormap=palette, mask=mask, width=800, height=500, stopwords=set(st.session_state.custom_stop_list), collocations=False)
-    wc.generate(" ".join(text_series))
+    
+    # Font Logic: If font is not found on system, WordCloud defaults to its internal font
+    try:
+        wc = WordCloud(
+            background_color="white", 
+            colormap=palette, 
+            mask=mask, 
+            width=800, 
+            height=500, 
+            font_path=selected_font if ".ttf" in selected_font or ".otf" in selected_font else None,
+            font_step=1,
+            stopwords=set(st.session_state.custom_stop_list), 
+            collocations=False
+        )
+        # Handle cases where user just passes the name string
+        if not (".ttf" in selected_font):
+            wc.font_path = None # Revert to default if not a direct path
+            
+        wc.generate(" ".join(text_series))
+    except:
+        wc = WordCloud(background_color="white", colormap=palette, mask=mask, width=800, height=500, collocations=False)
+        wc.generate(" ".join(text_series))
+
     fig, ax = plt.subplots(); ax.imshow(wc); ax.axis("off")
     return fig
 
@@ -110,13 +128,13 @@ def generate_improved_tree(text_series, min_freq, palette_name):
         pos = nx.spring_layout(T, k=1.6, seed=42)
         partition = community_louvain.best_partition(T)
         nx.draw_networkx_nodes(T, pos, node_size=2500, node_color=[partition[n] for n in T.nodes()], cmap=plt.get_cmap(palette_name), alpha=0.8)
-        nx.draw_networkx_labels(T, pos, font_size=9, font_weight='bold')
+        nx.draw_networkx_labels(T, pos, font_size=9, font_weight='bold') # Tree uses standard font
         nx.draw_networkx_edges(T, pos, alpha=0.1)
         plt.axis('off')
         return fig
     except: return None
 
-# --- UI ---
+# --- UI & Sidebar ---
 if 'custom_stop_list' not in st.session_state:
     st.session_state.custom_stop_list = DEFAULT_EXCLUSIONS.copy()
 
@@ -125,9 +143,27 @@ st.title("🧪 Fragrance Verbatim Lab Pro")
 with st.sidebar:
     st.header("📁 Data & Visuals")
     uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"])
-    min_freq_tree = st.slider("Tree Depth (Min Freq)", 2, 20, 5)
+    
+    st.divider()
+    st.subheader("Word Cloud Settings")
+    
+    # New Font Selection Menu
+    font_cat = st.selectbox("Font Category", ["Classic", "Modern", "Elegant", "Expressive"])
+    if font_cat == "Classic":
+        selected_font = st.selectbox("Font Style", ["Sans Serif", "Google Sans", "Roboto"])
+    elif font_cat == "Modern":
+        selected_font = st.selectbox("Font Style", ["Inter", "Helvetica Neue"])
+    elif font_cat == "Elegant":
+        selected_font = st.selectbox("Font Style", ["Playfair Display", "Canela"])
+    else:
+        selected_font = st.selectbox("Font Style", ["Clash Display", "Satoshi"])
+
     shape_opt = st.radio("Cloud Shape", ["Rectangle", "Square", "Round"])
     palette_opt = st.selectbox("Palette", ["copper", "GnBu", "YlOrBr", "RdPu"])
+    
+    st.divider()
+    st.subheader("Tree Settings")
+    min_freq_tree = st.slider("Tree Depth (Min Freq)", 2, 20, 5)
 
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Single Product", "⚔️ Comparison", "🌐 Factorial Map (FCA)", "🚫 Exclusions"])
 
@@ -141,8 +177,8 @@ with tab4:
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    p_col = st.sidebar.selectbox("Product ID", df.columns)
-    v_col = st.sidebar.selectbox("Verbatim", df.columns)
+    p_col = st.sidebar.selectbox("Product ID Column", df.columns)
+    v_col = st.sidebar.selectbox("Verbatim Column", df.columns)
 
     if st.sidebar.button("🚀 Process Data"):
         df['cleaned'] = df[v_col].apply(lambda x: clean_text(x, st.session_state.custom_stop_list))
@@ -156,15 +192,18 @@ if uploaded_file:
             target = st.selectbox("Select Fragrance", p_list)
             p_sub = df[df[p_col]==target]['cleaned']
             col1, col2 = st.columns(2)
-            with col1: st.pyplot(generate_word_cloud(p_sub, palette_opt, shape_opt))
-            with col2: st.pyplot(generate_improved_tree(p_sub, min_freq_tree, palette_opt))
+            with col1: 
+                st.markdown(f"**Word Cloud ({selected_font})**")
+                st.pyplot(generate_word_cloud(p_sub, palette_opt, shape_opt, selected_font))
+            with col2: 
+                st.markdown("**Word Tree (Standard)**")
+                st.pyplot(generate_improved_tree(p_sub, min_freq_tree, palette_opt))
 
         with tab2:
             st.subheader("⚔️ Scent Proximity")
             cl1, cl2 = st.columns(2)
             p1, p2 = cl1.selectbox("Product A", p_list, index=0), cl2.selectbox("Product B", p_list, index=min(1,len(p_list)-1))
             
-            # Reintroducing Proximity Score
             txt_a, txt_b = " ".join(df[df[p_col]==p1]['cleaned']), " ".join(df[df[p_col]==p2]['cleaned'])
             if txt_a and txt_b:
                 vec = CountVectorizer(); mtx = vec.fit_transform([txt_a, txt_b])
@@ -172,8 +211,8 @@ if uploaded_file:
                 st.metric("Similarity Score", f"{sim}%")
                 st.progress(sim/100)
             
-            cl1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt))
-            cl2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt))
+            cl1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, selected_font))
+            cl2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, selected_font))
 
         with tab3:
             st.subheader("🌐 FCA Map")
@@ -186,10 +225,8 @@ if uploaded_file:
                 ax.scatter(row_coords[:, 0], row_coords[:, 1], c='royalblue', s=150, alpha=0.6, label='Fragrances')
                 for i, p in enumerate(products): ax.text(row_coords[i,0], row_coords[i,1], f" {p}", fontweight='bold')
                 
-                # Plot Words (Stretched space)
                 ax.scatter(col_coords[:, 0], col_coords[:, 1], c='red', marker='x', alpha=0.5)
                 for i, w in enumerate(words):
-                    # Show words far from center
                     if np.linalg.norm(col_coords[i]) > np.mean(np.linalg.norm(col_coords, axis=1)):
                         ax.text(col_coords[i,0], col_coords[i,1], w, color='darkred', fontsize=8)
                 
