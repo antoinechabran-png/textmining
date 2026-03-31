@@ -6,9 +6,8 @@ networkx
 python-louvain
 wordcloud
 matplotlib
-python-pptx
 scikit-learn
-numpy
+numpy<2.0.0
 Pillow
-gensim
-pyLDAvis
+gensim==4.3.2
+pyLDAvis==3.4.1
