@@ -8,3 +8,5 @@ wordcloud
 matplotlib
 python-pptx
 openpyxl
+numpy
+pilllow
