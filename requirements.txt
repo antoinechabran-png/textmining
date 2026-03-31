@@ -1,0 +1,10 @@
+streamlit
+pandas
+spacy
+scikit-learn
+wordcloud
+networkx
+python-louvain
+openpyxl
+python-pptx
+matplotlib
