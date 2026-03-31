@@ -1,131 +1,185 @@
 import streamlit as st
 import pandas as pd
 import spacy
-from sklearn.feature_extraction.text import TfidfVectorizer
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
 import networkx as nx
 from community import community_louvain
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+from sklearn.feature_extraction.text import CountVectorizer
 from pptx import Presentation
 from pptx.util import Inches
 import io
-from collections import Counter
+import re
 
-# --- 1. THE BULLETPROOF LOADER ---
+# Page Config
+st.set_page_config(page_title="Fragrance Verbatim Lab", layout="wide")
+
+# --- NLP Setup ---
 @st.cache_resource
 def load_nlp():
-    # Attempt to load the model installed via requirements.txt
     try:
         return spacy.load("en_core_web_sm")
-    except Exception:
-        # Final fallback: try to load by string name
-        try:
-            import en_core_web_sm
-            return en_core_web_sm.load()
-        except ImportError:
-            return None
+    except OSError:
+        # Fallback for local environments where model isn't linked
+        return spacy.load("en_core_web_sm")
 
 nlp = load_nlp()
 
-# --- 2. APP CONFIG & SESSION STATE ---
-st.set_page_config(page_title="Fragrance Lab", layout="wide")
+def clean_text(text, custom_stopwords):
+    doc = nlp(str(text).lower())
+    tokens = [token.lemma_ for token in doc if token.is_alpha 
+              and not token.is_stop 
+              and token.lemma_ not in custom_stopwords]
+    return " ".join(tokens)
 
-if 'custom_stops' not in st.session_state:
-    st.session_state.custom_stops = "a, about, all, am, an, and, are, as, at, be, because, been, being, but, by, can, could, do, enough, feel, for, from, have, he, her, here, hers, herself, him, himself, his, how, i, if, in, it, its, itself, just, less, let, like, little, lot, make, me, more, my, myself, not, of, on, or, ought, our, ours, ourselves, product, real, she, should, so, that, the, their, theirs, them, themselves, there, these, they, think, this, those, to, too, until, very, we, what, when, where, which, while, who, whom, why, will, with, would, you, your, yours, yourself, yourselves, smell, remind, think, is, may, also, bit, go, put, out, into, quite, something, really, seem, evoke, find, everything, anything, almost, therefore, order, say, none, kind, kinda, either, one, nothing"
+# --- Visualizations ---
+def generate_word_cloud(text_series, palette, font_path, min_freq):
+    combined_text = " ".join(text_series)
+    if not combined_text.strip():
+        return None
+    
+    wc = WordCloud(
+        background_color="white",
+        colormap=palette,
+        font_path=font_path,
+        min_word_length=2,
+        width=800, height=400
+    ).generate(combined_text)
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.imshow(wc, interpolation='bilinear')
+    ax.axis("off")
+    return fig
 
-# --- 3. PROCESSING FUNCTIONS ---
+def generate_word_tree(text_series, min_freq, palette_name):
+    # Create Co-occurrence Matrix
+    vectorizer = CountVectorizer(ngram_range=(1, 1), min_df=min_freq)
+    sparse_matrix = vectorizer.fit_transform(text_series)
+    words = vectorizer.get_feature_names_out()
+    
+    # Adjacency matrix: (Words x Words)
+    adj_matrix = (sparse_matrix.T * sparse_matrix)
+    adj_matrix.setdiag(0)
+    
+    G = nx.from_scipy_sparse_array(adj_matrix)
+    mapping = {i: word for i, word in enumerate(words)}
+    G = nx.relabel_nodes(G, mapping)
+    
+    if len(G.nodes) == 0:
+        return None
 
-def get_filtered_data(data, text_col, min_freq):
-    # Check if nlp loaded correctly to avoid AttributeError
-    if nlp is None:
-        st.error("🚨 SpaCy model 'en_core_web_sm' not found. Please ensure your requirements.txt includes the download link.")
-        return None, None
+    # Community Detection
+    partition = community_louvain.best_partition(G)
+    
+    # Maximum Spanning Tree to create "Tree" effect
+    T = nx.maximum_spanning_tree(G)
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    pos = nx.spring_layout(T, k=0.5, seed=42)
+    
+    # Map colors
+    cmap = plt.get_cmap(palette_name)
+    node_colors = [partition[node] for node in T.nodes()]
+    
+    nx.draw_networkx_nodes(T, pos, node_size=700, node_color=node_colors, cmap=cmap, alpha=0.8)
+    nx.draw_networkx_labels(T, pos, font_size=10, font_family="sans-serif")
+    nx.draw_networkx_edges(T, pos, alpha=0.3)
+    
+    plt.axis('off')
+    return fig
 
-    stop_list = set([x.strip().lower() for x in st.session_state.custom_stops.split(",")])
-    all_tokens = []
-    docs_tokens = []
-    
-    # Process text
-    texts = data[text_col].astype(str).tolist()
-    for doc in nlp.pipe(texts, batch_size=50):
-        tokens = [t.lemma_.lower() for t in doc if t.lemma_.lower() not in stop_list and t.is_alpha and len(t.text) > 2]
-        docs_tokens.append(tokens)
-        all_tokens.extend(tokens)
-    
-    counts = Counter(all_tokens)
-    valid_words = {word for word, count in counts.items() if count >= min_freq}
-    
-    final_docs = [" ".join([w for w in doc if w in valid_words]) for doc in docs_tokens]
-    final_docs = [d for d in final_docs if d.strip()]
-    
-    return final_docs, valid_words
+# --- UI Sidebar ---
+st.sidebar.header("🧪 Lab Settings")
+uploaded_file = st.sidebar.file_uploader("Upload Fragrance Data (Excel)", type=["xlsx"])
 
-def create_visuals(cleaned_text, palette):
-    if not cleaned_text: return None, None
-    
-    weights = Counter(" ".join(cleaned_text).split())
-    G = nx.Graph()
-    for text in cleaned_text:
-        words = list(set(text.split()))
-        for i in range(len(words)):
-            for j in range(i + 1, len(words)):
-                G.add_edge(words[i], words[j], weight=G.get_edge_data(words[i], words[j], {'weight': 0})['weight'] + 1)
-    
-    partition = community_louvain.best_partition(G) if len(G.nodes) > 1 else {w: 0 for w in weights}
-    cmap = plt.get_cmap(palette)
-    
-    def color_func(word, **kwargs):
-        rgb = [int(x*255) for x in cmap(partition.get(word, 0) % 10)[:3]]
-        return f"rgb({rgb[0]}, {rgb[1]}, {rgb[2]})"
+custom_stopwords_input = st.sidebar.text_area(
+    "Custom Stopwords (comma separated)", 
+    "smell, product, think, fragrance, perfume, like"
+)
+custom_stopwords = [x.strip() for x in custom_stopwords_input.split(",")]
 
-    wc = WordCloud(background_color="white", color_func=color_func, width=1000, height=600).generate_from_frequencies(weights)
+min_freq = st.sidebar.slider("Min Word Frequency", 2, 10, 3)
+
+st.sidebar.subheader("🎨 Design Studio")
+palettes = {
+    "Pastel": "Pastel1", 
+    "Woody": "copper", 
+    "Fresh": "GnBu", 
+    "Citrus": "YlOrBr", 
+    "Floral": "RdPu",
+    "Deep Sea": "coolwarm"
+}
+selected_palette = st.sidebar.selectbox("Color Palette", list(palettes.keys()))
+
+# --- Main App Logic ---
+if uploaded_file:
+    df = pd.read_excel(uploaded_file)
+    cols = df.columns.tolist()
     
-    fig_tree, ax = plt.subplots(figsize=(10, 8))
-    if len(G.nodes) > 1:
-        T = nx.maximum_spanning_tree(G, weight='weight')
-        pos = nx.kamada_kawai_layout(T)
-        nx.draw_networkx_edges(T, pos, alpha=0.2, edge_color='gray')
-        for node, (x, y) in pos.items():
-            ax.text(x, y, node, fontsize=10, ha='center', va='center',
-                    bbox=dict(facecolor='white', alpha=0.8, edgecolor=color_func(node), boxstyle='round'))
-        ax.axis('off')
-    else:
-        ax.text(0.5, 0.5, "Not enough connections for a tree.", ha='center'); ax.axis('off')
+    col1, col2 = st.columns(2)
+    with col1:
+        prod_col = st.selectbox("Product ID Column", cols)
+    with col2:
+        verb_col = st.selectbox("Verbatim Column", cols)
         
-    return wc, fig_tree
-
-# --- 4. UI ---
-
-st.sidebar.title("Settings")
-min_f = st.sidebar.slider("Min. Frequency", 2, 10, 2)
-pal = st.sidebar.selectbox("Palette", ["Pastel1", "GnBu", "Blues", "YlOrRd", "tab10"])
-
-t1, t2 = st.tabs(["Analysis", "Exclusions"])
-
-with t2:
-    st.session_state.custom_stops = st.text_area("Stopwords", st.session_state.custom_stops, height=300)
-
-up = st.file_uploader("Upload Excel", type=["xlsx"])
-
-if up:
-    df = pd.read_excel(up)
-    prod_c = st.selectbox("Product Column", df.columns)
-    text_c = st.selectbox("Verbatim Column", df.columns)
+    # Process Text
+    df['cleaned'] = df[verb_col].apply(lambda x: clean_text(x, custom_stopwords))
     
-    prod_val = st.selectbox("Select Product", df[prod_c].unique())
+    tab1, tab2 = st.tabs(["Single Product Analysis", "Comparison Lab"])
     
-    if st.button("Generate"):
-        sub = df[df[prod_c] == prod_val]
-        res = get_filtered_data(sub, text_c, min_f)
+    with tab1:
+        product_list = df[prod_col].unique()
+        selected_prod = st.selectbox("Select Product", product_list)
+        prod_data = df[df[prod_col] == selected_prod]['cleaned']
         
-        if res and res[0]:
-            cleaned, valid = res
-            wc, tree = create_visuals(cleaned, pal)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Scent Word Cloud")
+            fig_wc = generate_word_cloud(prod_data, palettes[selected_palette], None, min_freq)
+            if fig_wc: st.pyplot(fig_wc)
+        
+        with c2:
+            st.subheader("Scent Relationship Tree")
+            fig_tree = generate_word_tree(prod_data, min_freq, palettes[selected_palette])
+            if fig_tree: st.pyplot(fig_tree)
             
-            c1, c2 = st.columns(2)
-            with c1:
-                f1, a1 = plt.subplots(); a1.imshow(wc); a1.axis("off"); st.pyplot(f1)
-            with c2:
-                st.pyplot(tree)
-        else:
-            st.warning("No words met the criteria. Check the exclusion list or decrease Min. Frequency.")
+    with tab2:
+        st.subheader("Side-by-Side Comparison")
+        comp_col1, comp_col2 = st.columns(2)
+        
+        p1 = comp_col1.selectbox("Product A", product_list, index=0)
+        p2 = comp_col2.selectbox("Product B", product_list, index=min(1, len(product_list)-1))
+        
+        data_a = df[df[prod_col] == p1]['cleaned']
+        data_b = df[df[prod_col] == p2]['cleaned']
+        
+        comp_col1.pyplot(generate_word_cloud(data_a, palettes[selected_palette], None, min_freq))
+        comp_col2.pyplot(generate_word_cloud(data_b, palettes[selected_palette], None, min_freq))
+        
+        comp_col1.pyplot(generate_word_tree(data_a, min_freq, palettes[selected_palette]))
+        comp_col2.pyplot(generate_word_tree(data_b, min_freq, palettes[selected_palette]))
+
+    # --- PPTX Export ---
+    if st.button("Export Lab Results to PPTX"):
+        prs = Presentation()
+        
+        def add_slide(title, fig):
+            slide = prs.slides.add_slide(prs.slide_layouts[5])
+            slide.shapes.title.text = title
+            img_stream = io.BytesIO()
+            fig.savefig(img_stream, format='png')
+            slide.shapes.add_picture(img_stream, Inches(1), Inches(1.5), width=Inches(8))
+
+        if fig_wc: add_slide(f"Word Cloud: {selected_prod}", fig_wc)
+        if fig_tree: add_slide(f"Word Tree: {selected_prod}", fig_tree)
+        
+        binary_output = io.BytesIO()
+        prs.save(binary_output)
+        st.download_button(
+            label="Download PowerPoint",
+            data=binary_output.getvalue(),
+            file_name="Fragrance_Analysis.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+else:
+    st.info("👋 Welcome to the Fragrance Verbatim Lab. Please upload an Excel file to begin.")
