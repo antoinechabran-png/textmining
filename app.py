@@ -45,39 +45,24 @@ def get_sentiment_words(text_series):
     return pos, neg
 
 def run_fca(df, p_col, fmin, use_tfidf):
-    # Grouping verbatims by product
     grouped = df.groupby(p_col)['cleaned'].apply(lambda x: " ".join(x))
     if len(grouped) < 3: return None, "Need 3+ products for Factorial Mapping."
-    
     VecClass = TfidfVectorizer if use_tfidf else CountVectorizer
     vec = VecClass(min_df=fmin, stop_words=st.session_state.custom_stop_list)
     X = vec.fit_transform(grouped).toarray()
     words, products = vec.get_feature_names_out(), grouped.index.tolist()
-    
-    # Mathematical Centering for Better Visualization
     X_centered = X - np.mean(X, axis=0)
     svd = TruncatedSVD(n_components=2, random_state=42)
     row_coords = svd.fit_transform(X_centered)
-    
-    # Normalized column coordinates to match row scale
     col_coords = svd.components_.T * (np.std(row_coords) / (np.std(svd.components_.T) + 1e-9))
-    
     return (row_coords, col_coords, products, words, svd.explained_variance_ratio_), None
 
-def generate_word_cloud(text_series, palette, shape, font_path=None):
+def generate_word_cloud(text_series, palette, shape):
     mask = None
     if shape == "Round":
         img = Image.new("L", (800, 800), 255)
         draw = ImageDraw.Draw(img); draw.ellipse((20,20,780,780), fill=0); mask = np.array(img)
-    
-    wc = WordCloud(
-        background_color="white", 
-        colormap=palette, 
-        mask=mask, 
-        width=800, 
-        height=500, 
-        collocations=False
-    )
+    wc = WordCloud(background_color="white", colormap=palette, mask=mask, width=800, height=500, collocations=False)
     wc.generate(" ".join(text_series))
     fig, ax = plt.subplots(); ax.imshow(wc); ax.axis("off"); return fig
 
@@ -130,9 +115,9 @@ if uploaded_file:
             target = st.selectbox("Fragrance Focus", p_list, key="single_focus")
             p_sub = df[df[p_col]==target]['cleaned']
             
-            # 1. Overall Mood Score
+            # --- 1. Renamed Overall Fragrance Mood ---
             sent_val = df[df[p_col]==target][v_col].apply(lambda x: TextBlob(str(x)).sentiment.polarity).mean()
-            st.metric("Overall Brand Mood", f"{'Positive' if sent_val > 0 else 'Negative'}", f"{round(sent_val*100, 1)}%")
+            st.metric("Overall Fragrance Mood", f"{'Positive' if sent_val > 0 else 'Negative'}", f"{round(sent_val*100, 1)}%")
             st.progress((sent_val + 1) / 2)
             st.divider()
 
@@ -181,11 +166,15 @@ if uploaded_file:
             data_a = df[df[p_col]==prod_a]['cleaned']
             data_b = df[df[p_col]==prod_b]['cleaned']
             
-            # Similarity Calculation
+            # --- Similarity Calculation with Visual Progress Bar ---
             if not data_a.empty and not data_b.empty:
                 v_comp = TfidfVectorizer().fit_transform([" ".join(data_a), " ".join(data_b)])
-                sim_score = cosine_similarity(v_comp[0], v_comp[1])[0][0]
-                st.center = st.columns([1,2,1])[1].metric("Olfactory Similarity", f"{round(sim_score*100, 1)}%")
+                sim_score = float(cosine_similarity(v_comp[0], v_comp[1])[0][0])
+                
+                mid_col = st.columns([1,2,1])[1]
+                mid_col.metric("Olfactive Similarity", f"{round(sim_score*100, 1)}%")
+                mid_col.progress(sim_score)
+                st.divider()
             
             comp_cols[0].pyplot(generate_word_cloud(data_a, palette_opt, shape_opt))
             comp_cols[1].pyplot(generate_word_cloud(data_b, palette_opt, shape_opt))
@@ -196,20 +185,14 @@ if uploaded_file:
             if not err:
                 r_c, c_c, prods, wrds, var = res
                 fig, ax = plt.subplots(figsize=(12, 8))
-                
-                # Plot Products
                 ax.scatter(r_c[:,0], r_c[:,1], c='blue', s=150, alpha=0.7, label="Products")
                 for i, txt in enumerate(prods): 
                     ax.text(r_c[i,0]+0.02, r_c[i,1]+0.02, txt, fontweight='bold', color='darkblue')
-                
-                # Plot Words
                 ax.scatter(c_c[:,0], c_c[:,1], c='red', marker='x', alpha=0.3, label="Descriptors")
                 for i, txt in enumerate(wrds):
-                    # Only label words that are statistically significant (further from origin)
                     dist = np.linalg.norm(c_c[i])
                     if dist > np.percentile([np.linalg.norm(c) for c in c_c], 70):
                         ax.text(c_c[i,0], c_c[i,1], txt, color='darkred', fontsize=9, alpha=0.8)
-                
                 ax.axhline(0, color='black', lw=0.5, ls='--')
                 ax.axvline(0, color='black', lw=0.5, ls='--')
                 ax.set_xlabel(f"Dim 1 ({round(var[0]*100,1)}%)")
@@ -225,20 +208,17 @@ if uploaded_file:
                 mtx_t = vec_t.fit_transform(df['cleaned'])
                 nmf = NMF(n_components=num_t, random_state=42, init='nndsvd').fit(mtx_t)
                 feature_names = vec_t.get_feature_names_out()
-                
                 t_cols = st.columns(min(num_t, 3))
                 for i, topic in enumerate(nmf.components_):
                     with t_cols[i % 3]:
                         top_words = [feature_names[j] for j in topic.argsort()[-10:]]
                         st.info(f"**Theme {i+1}**\n\n" + ", ".join(top_words))
-                        
-                        # Find representative product
                         relevance = mtx_t.dot(topic)
                         st.caption(f"Lead Product: {df.iloc[relevance.argmax()][p_col]}")
 
 with tab5:
     st.subheader("🚫 Exclusions")
-    txt = st.text_area("Stopwords (comma separated)", value=", ".join(st.session_state.custom_stop_list), height=300)
+    txt = st.text_area("Stopwords", value=", ".join(st.session_state.custom_stop_list), height=300)
     if st.button("Update Exclusions"):
         st.session_state.custom_stop_list = [x.strip().lower() for x in txt.split(",") if x.strip()]
         st.rerun()
