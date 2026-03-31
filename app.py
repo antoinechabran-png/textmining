@@ -51,15 +51,30 @@ def clean_text(text, custom_stops):
     words = re.findall(r'\b[a-z]{3,}\b', str(text).lower())
     return " ".join([lemmatizer.lemmatize(w) for w in words if w not in custom_stops])
 
-# --- Logic for Proximity ---
-def get_similarity_score(text_a, text_b):
-    if not text_a or not text_b: return 0.0
+# --- Logic for Proximity & Shared DNA ---
+def analyze_shared_dna(text_a, text_b):
+    if not text_a or not text_b: return 0.0, pd.DataFrame()
+    
     vec = CountVectorizer()
-    try:
-        matrix = vec.fit_transform([text_a, text_b])
-        sim = cosine_similarity(matrix[0:1], matrix[1:2])[0][0]
-        return round(sim * 100, 1)
-    except: return 0.0
+    matrix = vec.fit_transform([text_a, text_b])
+    vocab = vec.get_feature_names_out()
+    
+    # 1. Similarity Score
+    sim = cosine_similarity(matrix[0:1], matrix[1:2])[0][0]
+    
+    # 2. Shared Words Analysis
+    counts_a = matrix.toarray()[0]
+    counts_b = matrix.toarray()[1]
+    
+    shared_data = []
+    for i, word in enumerate(vocab):
+        if counts_a[i] > 0 and counts_b[i] > 0:
+            # Strength is the geometric mean of frequencies
+            strength = np.sqrt(counts_a[i] * counts_b[i])
+            shared_data.append({"Word": word, "Link Strength": strength})
+    
+    df_shared = pd.DataFrame(shared_data).sort_values(by="Link Strength", ascending=False).head(10)
+    return round(sim * 100, 1), df_shared
 
 # --- Visual Logic ---
 def get_cloud_mask(shape):
@@ -76,20 +91,16 @@ def generate_word_cloud(text_series, palette, shape, font, disposition, use_tfid
     mask, dims = get_cloud_mask(shape)
     pref_horiz = 1.0 if disposition == "Only Horizontal" else 0.6
     
-    # Frequency Logic
     if use_tfidf and all_data is not None:
         tfidf = TfidfVectorizer()
-        tfidf_matrix = tfidf.fit_transform(all_data)
+        tfidf.fit(all_data)
         feature_names = tfidf.get_feature_names_out()
-        # Filter for the specific product's text
         prod_text = " ".join(text_series)
         response = tfidf.transform([prod_text])
         frequencies = {feature_names[i]: response[0, i] for i in response.indices}
     else:
-        # Standard Count
         combined_text = " ".join(text_series)
-        wc_temp = WordCloud().process_text(combined_text)
-        frequencies = wc_temp
+        frequencies = WordCloud().process_text(combined_text)
 
     wc = WordCloud(
         background_color="white", colormap=palette, mask=mask,
@@ -154,13 +165,13 @@ with st.sidebar:
     font_opt = st.selectbox("Font Style", ["sans-serif", "serif", "monospace"])
     
     st.header("🔬 Advanced NLP")
-    use_tfidf = st.toggle("Activate TF-IDF Weighting", value=False, help="Weights words by uniqueness across all products rather than just frequency.")
+    use_tfidf = st.toggle("Activate TF-IDF Weighting", value=False)
 
 # Tabs
 tab1, tab2, tab3 = st.tabs(["📊 Single Product", "⚔️ Comparison Lab", "🚫 Exclusion List"])
 
 with tab3:
-    st.subheader("Exclusion List")
+    st.subheader("Manage Global Exclusion List")
     current_list = ", ".join(st.session_state.custom_stop_list)
     updated_input = st.text_area("Stopwords", value=current_list, height=450)
     if st.button("Save Changes"):
@@ -192,24 +203,45 @@ if uploaded_file:
                 st.pyplot(generate_improved_tree(p_data, min_freq, palette_opt, font_opt))
 
         with tab2:
-            st.subheader("Scent Proximity Comparison")
-            cl1, cl2 = st.columns(2)
-            p1 = cl1.selectbox("Product A", p_list, index=0)
-            p2 = cl2.selectbox("Product B", p_list, index=min(1, len(p_list)-1))
+            st.subheader("⚔️ Scent Comparison & Proximity Score")
+            p_comp_1, p_comp_2 = st.columns(2)
+            p1 = p_comp_1.selectbox("Fragrance A", p_list, index=0)
+            p2 = p_comp_2.selectbox("Fragrance B", p_list, index=min(1, len(p_list)-1))
             
-            # Text for Similarity
+            # Data prep
             text_a = " ".join(df[df[p_col]==p1]['cleaned'])
             text_b = " ".join(df[df[p_col]==p2]['cleaned'])
-            sim_score = get_similarity_score(text_a, text_b)
             
-            # Nice Proximity UI
-            st.markdown(f"#### Olfactory Similarity: **{sim_score}%**")
-            st.progress(sim_score / 100)
-            if sim_score > 70: st.success("These fragrances share a very similar consumer perception profile.")
-            elif sim_score < 30: st.warning("These fragrances are perceived as highly distinct.")
-
+            # Similarity Logic
+            score, shared_df = analyze_shared_dna(text_a, text_b)
+            
+            # Similarity UI (BEFORE Clouds)
+            st.write(f"### Olfactory Similarity: **{score}%**")
+            st.progress(score / 100)
+            
             st.divider()
-            cl1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
-            cl2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
+            
+            # Word Clouds
+            col_cloud_a, col_cloud_b = st.columns(2)
+            with col_cloud_a:
+                st.write(f"**{p1}** Profile")
+                st.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
+            with col_cloud_b:
+                st.write(f"**{p2}** Profile")
+                st.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, font_opt, disposition_opt, use_tfidf, all_cleaned_texts))
+            
+            st.divider()
+            
+            # Shared DNA (AFTER Clouds)
+            st.subheader("🧬 Shared Olfactive DNA")
+            st.write("Top 10 shared descriptors contributing to the similarity score.")
+            
+            if not shared_df.empty:
+                # Format weight for display
+                shared_df['Link Strength'] = shared_df['Link Strength'].apply(lambda x: "▮" * int(min(x, 10)))
+                st.table(shared_df)
+            else:
+                st.warning("No shared descriptors found between these two products.")
+
 else:
     st.info("Upload your Excel file to begin.")
