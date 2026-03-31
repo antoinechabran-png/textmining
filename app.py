@@ -13,6 +13,14 @@ import re
 import numpy as np
 from PIL import Image, ImageDraw
 
+# New imports for Topic Modeling
+import gensim
+import gensim.corpora as corpora
+from gensim.models import LdaModel
+import pyLDAvis
+import pyLDAvis.gensim_models
+import streamlit.components.v1 as components
+
 # Page Config
 st.set_page_config(page_title="Fragrance Verbatim Lab Pro", layout="wide", page_icon="🧪")
 
@@ -55,29 +63,38 @@ def clean_text(text, custom_stops):
             cleaned.append(lemma)
     return " ".join(cleaned)
 
+# --- Topic Modeling Function ---
+def run_lda_analysis(text_series, num_topics):
+    tokenized = [doc.split() for doc in text_series if len(doc.split()) > 1]
+    if len(tokenized) < 5: return None, "Not enough data for Topic Modeling."
+    
+    id2word = corpora.Dictionary(tokenized)
+    corpus = [id2word.doc2bow(text) for text in tokenized]
+    
+    lda_model = LdaModel(corpus=corpus, id2word=id2word, num_topics=num_topics, 
+                         random_state=42, passes=10, alpha='auto', per_word_topics=True)
+    
+    vis_data = pyLDAvis.gensim_models.prepare(lda_model, corpus, id2word)
+    return vis_data, None
+
 # --- Analysis Functions ---
 def run_fca(df, p_col, fmin):
     grouped = df.groupby(p_col)['cleaned'].apply(lambda x: " ".join(x))
     if len(grouped) < 3: return None, "Need at least 3 products."
-
     vec = CountVectorizer(min_df=fmin, stop_words=st.session_state.custom_stop_list)
     X = vec.fit_transform(grouped).toarray()
     words = vec.get_feature_names_out()
     products = grouped.index.tolist()
-
     if X.shape[1] < 2: return None, "Not enough words meet Fmin."
-
     total = np.sum(X)
     row_sums = np.sum(X, axis=1, keepdims=True)
     col_sums = np.sum(X, axis=0, keepdims=True)
     expected = (row_sums @ col_sums) / total
     Z = (X - expected) / np.sqrt(expected)
-    
     svd = TruncatedSVD(n_components=2)
     row_coords = svd.fit_transform(Z)
     col_coords = svd.components_.T
     col_coords = col_coords * (np.std(row_coords) / np.std(col_coords))
-    
     return (row_coords, col_coords, products, words, svd.explained_variance_ratio_*100), None
 
 # --- Visualization ---
@@ -87,29 +104,17 @@ def generate_word_cloud(text_series, palette, shape, selected_font):
         img = Image.new("L", (800, 800), 255)
         draw = ImageDraw.Draw(img); draw.ellipse((20,20,780,780), fill=0)
         mask = np.array(img)
-    
-    # Font Logic: If font is not found on system, WordCloud defaults to its internal font
     try:
         wc = WordCloud(
-            background_color="white", 
-            colormap=palette, 
-            mask=mask, 
-            width=800, 
-            height=500, 
+            background_color="white", colormap=palette, mask=mask, width=800, height=500, 
             font_path=selected_font if ".ttf" in selected_font or ".otf" in selected_font else None,
-            font_step=1,
-            stopwords=set(st.session_state.custom_stop_list), 
-            collocations=False
+            font_step=1, stopwords=set(st.session_state.custom_stop_list), collocations=False
         )
-        # Handle cases where user just passes the name string
-        if not (".ttf" in selected_font):
-            wc.font_path = None # Revert to default if not a direct path
-            
+        if not (".ttf" in selected_font): wc.font_path = None
         wc.generate(" ".join(text_series))
     except:
         wc = WordCloud(background_color="white", colormap=palette, mask=mask, width=800, height=500, collocations=False)
         wc.generate(" ".join(text_series))
-
     fig, ax = plt.subplots(); ax.imshow(wc); ax.axis("off")
     return fig
 
@@ -128,13 +133,13 @@ def generate_improved_tree(text_series, min_freq, palette_name):
         pos = nx.spring_layout(T, k=1.6, seed=42)
         partition = community_louvain.best_partition(T)
         nx.draw_networkx_nodes(T, pos, node_size=2500, node_color=[partition[n] for n in T.nodes()], cmap=plt.get_cmap(palette_name), alpha=0.8)
-        nx.draw_networkx_labels(T, pos, font_size=9, font_weight='bold') # Tree uses standard font
+        nx.draw_networkx_labels(T, pos, font_size=9, font_weight='bold')
         nx.draw_networkx_edges(T, pos, alpha=0.1)
         plt.axis('off')
         return fig
     except: return None
 
-# --- UI & Sidebar ---
+# --- UI ---
 if 'custom_stop_list' not in st.session_state:
     st.session_state.custom_stop_list = DEFAULT_EXCLUSIONS.copy()
 
@@ -143,29 +148,19 @@ st.title("🧪 Fragrance Verbatim Lab Pro")
 with st.sidebar:
     st.header("📁 Data & Visuals")
     uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"])
-    
     st.divider()
-    st.subheader("Word Cloud Settings")
-    
-    # New Font Selection Menu
+    st.subheader("Word Cloud Style")
     font_cat = st.selectbox("Font Category", ["Classic", "Modern", "Elegant", "Expressive"])
-    if font_cat == "Classic":
-        selected_font = st.selectbox("Font Style", ["Sans Serif", "Google Sans", "Roboto"])
-    elif font_cat == "Modern":
-        selected_font = st.selectbox("Font Style", ["Inter", "Helvetica Neue"])
-    elif font_cat == "Elegant":
-        selected_font = st.selectbox("Font Style", ["Playfair Display", "Canela"])
-    else:
-        selected_font = st.selectbox("Font Style", ["Clash Display", "Satoshi"])
-
+    if font_cat == "Classic": selected_font = st.selectbox("Font Style", ["Sans Serif", "Google Sans", "Roboto"])
+    elif font_cat == "Modern": selected_font = st.selectbox("Font Style", ["Inter", "Helvetica Neue"])
+    elif font_cat == "Elegant": selected_font = st.selectbox("Font Style", ["Playfair Display", "Canela"])
+    else: selected_font = st.selectbox("Font Style", ["Clash Display", "Satoshi"])
     shape_opt = st.radio("Cloud Shape", ["Rectangle", "Square", "Round"])
     palette_opt = st.selectbox("Palette", ["copper", "GnBu", "YlOrBr", "RdPu"])
-    
     st.divider()
-    st.subheader("Tree Settings")
     min_freq_tree = st.slider("Tree Depth (Min Freq)", 2, 20, 5)
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Single Product", "⚔️ Comparison", "🌐 Factorial Map (FCA)", "🚫 Exclusions"])
+tab1, tab2, tab3, tab5, tab4 = st.tabs(["📊 Single Product", "⚔️ Comparison", "🌐 Factorial Map (FCA)", "🔍 Topic Lab", "🚫 Exclusions"])
 
 with tab4:
     st.subheader("Global Exclusion List")
@@ -192,43 +187,58 @@ if uploaded_file:
             target = st.selectbox("Select Fragrance", p_list)
             p_sub = df[df[p_col]==target]['cleaned']
             col1, col2 = st.columns(2)
-            with col1: 
-                st.markdown(f"**Word Cloud ({selected_font})**")
-                st.pyplot(generate_word_cloud(p_sub, palette_opt, shape_opt, selected_font))
-            with col2: 
-                st.markdown("**Word Tree (Standard)**")
-                st.pyplot(generate_improved_tree(p_sub, min_freq_tree, palette_opt))
+            with col1: st.pyplot(generate_word_cloud(p_sub, palette_opt, shape_opt, selected_font))
+            with col2: st.pyplot(generate_improved_tree(p_sub, min_freq_tree, palette_opt))
 
         with tab2:
             st.subheader("⚔️ Scent Proximity")
             cl1, cl2 = st.columns(2)
             p1, p2 = cl1.selectbox("Product A", p_list, index=0), cl2.selectbox("Product B", p_list, index=min(1,len(p_list)-1))
-            
             txt_a, txt_b = " ".join(df[df[p_col]==p1]['cleaned']), " ".join(df[df[p_col]==p2]['cleaned'])
             if txt_a and txt_b:
                 vec = CountVectorizer(); mtx = vec.fit_transform([txt_a, txt_b])
                 sim = round(cosine_similarity(mtx[0:1], mtx[1:2])[0][0]*100, 1)
                 st.metric("Similarity Score", f"{sim}%")
                 st.progress(sim/100)
-            
             cl1.pyplot(generate_word_cloud(df[df[p_col]==p1]['cleaned'], palette_opt, shape_opt, selected_font))
             cl2.pyplot(generate_word_cloud(df[df[p_col]==p2]['cleaned'], palette_opt, shape_opt, selected_font))
 
         with tab3:
-            st.subheader("🌐 FCA Map")
-            fmin = st.slider("Min word frequency ($F_{min}$)", 1, 30, 5)
-            res, err = run_fca(df, p_col, fmin)
+            st.subheader("🌐 FCA Factorial Map")
+            fmin_fca = st.slider("Min word frequency (FCA)", 1, 30, 5)
+            res, err = run_fca(df, p_col, fmin_fca)
             if err: st.error(err)
             else:
                 row_coords, col_coords, products, words, var_exp = res
                 fig, ax = plt.subplots(figsize=(10, 7))
-                ax.scatter(row_coords[:, 0], row_coords[:, 1], c='royalblue', s=150, alpha=0.6, label='Fragrances')
+                ax.scatter(row_coords[:, 0], row_coords[:, 1], c='royalblue', s=150, alpha=0.6)
                 for i, p in enumerate(products): ax.text(row_coords[i,0], row_coords[i,1], f" {p}", fontweight='bold')
-                
                 ax.scatter(col_coords[:, 0], col_coords[:, 1], c='red', marker='x', alpha=0.5)
                 for i, w in enumerate(words):
                     if np.linalg.norm(col_coords[i]) > np.mean(np.linalg.norm(col_coords, axis=1)):
                         ax.text(col_coords[i,0], col_coords[i,1], w, color='darkred', fontsize=8)
-                
-                ax.axhline(0, color='grey', ls='--'); ax.axvline(0, color='grey', ls='--')
                 st.pyplot(fig)
+
+        with tab5:
+            st.subheader("🔍 Topic Lab: Scent Theme Discovery")
+            t_col1, t_col2 = st.columns([1, 3])
+            
+            with t_col1:
+                topic_scope = st.radio("Analysis Scope", ["All Products", "Selected Product"])
+                if topic_scope == "Selected Product":
+                    t_target = st.selectbox("Fragrance to Analyze", p_list, key="topic_target")
+                    data_to_model = df[df[p_col] == t_target]['cleaned']
+                else:
+                    data_to_model = df['cleaned']
+                
+                num_topics = st.slider("Number of Themes", 2, 6, 3)
+                run_topic = st.button("🪄 Extract Themes")
+
+            if run_topic:
+                with st.spinner("Decoding olfactive themes..."):
+                    vis_data, err = run_lda_analysis(data_to_model, num_topics)
+                    if err:
+                        st.error(err)
+                    else:
+                        html_string = pyLDAvis.prepared_data_to_html(vis_data)
+                        components.html(html_string, width=1300, height=800, scrolling=True)
